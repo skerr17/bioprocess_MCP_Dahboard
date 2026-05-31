@@ -58,5 +58,21 @@ DATA_PATH = "./data/batch-1-10.csv"
 
 # load the data set 
 df_batch_1_10 = pd.read_csv("./data/batches-subset-1-10.csv")
-
 # print(df_batch_1_10.head(5))
+
+
+# assigning phases to each time point in the data set
+def assign_phase(t):
+    if t < 50:
+        return "Lag"
+    elif t < 150:
+        return "Exponential"
+    elif t < 200:
+        return "Stationary"
+    else:
+        return "Decline"
+
+df_batch_1_10["phase"] = df_batch_1_10["Time (h)"].apply(assign_phase)
+
+#saved_phases = df_batch_1_10["phase"].unique().tolist()
+#print("Saved phases:", saved_phases)
