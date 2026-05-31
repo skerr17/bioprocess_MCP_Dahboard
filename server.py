@@ -76,3 +76,9 @@ df_batch_1_10["phase"] = df_batch_1_10["Time (h)"].apply(assign_phase)
 
 #saved_phases = df_batch_1_10["phase"].unique().tolist()
 #print("Saved phases:", saved_phases)
+
+# removing unnecessary columns and rows with missing values
+# drop unnecessary columns not relevant for analysis
+df_batch_1_10 = df_batch_1_10.drop(columns=[
+        '0 - Recipe driven 1 - Operator controlled(Control_ref:Control ref)', 
+        'Fault reference(Fault_ref:Fault ref)'])
