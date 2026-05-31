@@ -13,10 +13,8 @@ import pandas as pd
 from scipy import stats
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from mcp.server import Server
-from mcp.server.stdio import stdio_server # a simple server that uses standard input and output to communicate with the client (Claude Desktop)
-from mcp import types # defines the data structures MCP uses to communicate between the server and the client (Claude Desktop)
-
+import os
+from mcp.server.fastmcp import FastMCP
 
 # Constants (potentially could be moved to a config file or revisited)
 PHASE_BOUNDARIES = {
@@ -51,7 +49,9 @@ PHASE_RANGE_VARS = [
 ]
 
 N_PCS = 3
-DATA_PATH = "./data/batches-subset-1-10.csv"
+import os
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_PATH = os.path.join(BASE_DIR, "data", "batches-subset-1-10.csv")
 
 
 # Load and prepare data
@@ -131,16 +131,18 @@ phase_ranges = (
     .unstack(level=-1) 
 )
 
-'''
-# initialise the MCP server
-app = Server("pharma-analytics")
 
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
+# initialise the MCP server
+app = FastMCP("pharma-analytics")
+
+
+@app.tool()
+async def classify_phase(time_h: float) -> str:
+    """Classify which fermentation phase a time point falls in."""
+    phase = assign_phase(time_h)
+    result = {"time_h": time_h, "phase": phase}
+    return json.dumps(result)
+
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
-
-'''
+    app.run()
