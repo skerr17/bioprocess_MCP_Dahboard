@@ -143,6 +143,142 @@ async def classify_phase(time_h: float) -> str:
     result = {"time_h": time_h, "phase": phase}
     return json.dumps(result)
 
+@app.tool()
+async def get_batch_summary(batch_id: int = None) -> str:
+    """Descriptive stats for key process variables in one or all batches."""
+    key_vars = [
+        "pH(pH:pH)",
+        "Temperature(T:K)",
+        "Dissolved oxygen concentration(DO2:mg/L)",
+        "Penicillin concentration(P:g/L)",
+        "Oxygen Uptake Rate(OUR:(g min^{-1}))",
+        "Carbon evolution rate(CER:g/h)",
+        "Sugar feed rate(Fs:L/h)",
+    ]
+    subset = df_batch_1_10[df_batch_1_10["batch_id"] == batch_id] if batch_id else df_batch_1_10
+    if subset.empty:
+        return json.dumps({"error": f"Batch {batch_id} not found."})
+    summary = subset[key_vars].describe().loc[["mean", "std", "min", "max"]]
+    result = {
+        "batch_id": batch_id if batch_id else "all",
+        "n_observations": len(subset),
+        "stats": {
+            col: {stat: round(float(summary.loc[stat, col]), 4) for stat in summary.index}
+            for col in key_vars
+        },
+    }
+    return json.dumps(result, indent=2)
+
+
+@app.tool()
+async def get_phase_envelope(phase: str, variable: str = None) -> str:
+    """Phase-specific operating envelopes — 2.5th, 50th, 97.5th percentiles."""
+    valid_phases = list(PHASE_BOUNDARIES.keys())
+    if phase not in valid_phases:
+        return json.dumps({"error": f"Invalid phase. Choose from: {valid_phases}"})
+    row = phase_ranges.loc[phase]
+    if variable:
+        matching = {k: round(float(v), 4) for k, v in row.items() if variable in k}
+        if not matching:
+            avail = sorted({str(c[0]) for c in phase_ranges.columns})
+            return json.dumps({"error": f"Variable not found. Available: {avail}"})
+        out = {}
+        for k, v in matching.items():
+            quantile = str(k[1])
+            out[quantile] = v
+        return json.dumps({"phase": phase, "variable": variable, "envelope": out})
+    result = {}
+    for col, val in row.items():
+        var_name = str(col[0])
+        quantile = str(col[1])
+        result.setdefault(var_name, {})[quantile] = round(float(val), 4)
+    return json.dumps({"phase": phase, "envelopes": result}, indent=2)
+
+
+@app.tool()
+async def check_deviation(batch_id: int, time_h: float) -> str:
+    """Check Hotelling T² status for a batch at a given time."""
+    batch_mask = df_batch_1_10["batch_id"] == batch_id
+    if not batch_mask.any():
+        return json.dumps({"error": f"Batch {batch_id} not found."})
+    batch_df = df_batch_1_10[batch_mask].copy()
+    idx = (batch_df["Time (h)"] - time_h).abs().idxmin()
+    row = batch_df.loc[idx]
+    t2 = float(row["T2"])
+    if t2 > ucl_99:
+        status = "OUT_OF_CONTROL_99"
+        message = "T² exceeds 99% limit — significant deviation from golden batch."
+    elif t2 > ucl_95:
+        status = "WARNING_95"
+        message = "T² exceeds 95% limit — monitor closely."
+    else:
+        status = "IN_CONTROL"
+        message = "Batch is within the golden batch envelope."
+    return json.dumps({
+        "batch_id": batch_id,
+        "requested_time_h": time_h,
+        "nearest_time_h": round(float(row["Time (h)"]), 2),
+        "phase": str(row["phase"]),
+        "t2_value": round(t2, 3),
+        "ucl_95": round(float(ucl_95), 3),
+        "ucl_99": round(float(ucl_99), 3),
+        "status": status,
+        "message": message,
+    }, indent=2)
+
+
+@app.tool()
+async def get_pca_status(batch_id: int, time_h: float = None) -> str:
+    """PC1/PC2/PC3 scores for a batch at a time point or as a phase trajectory summary."""
+    batch_mask = df_batch_1_10["batch_id"] == batch_id
+    if not batch_mask.any():
+        return json.dumps({"error": f"Batch {batch_id} not found."})
+    batch_scores = scores[batch_mask.values, :N_PCS]
+    batch_times = df_batch_1_10.loc[batch_mask, "Time (h)"].values
+    batch_phases = df_batch_1_10.loc[batch_mask, "phase"].values
+    ve = {f"PC{i+1}": round(float(pca.explained_variance_ratio_[i]) * 100, 2) for i in range(N_PCS)}
+    if time_h is not None:
+        nearest_idx = int(np.argmin(np.abs(batch_times - time_h)))
+        return json.dumps({
+            "batch_id": batch_id,
+            "nearest_time_h": round(float(batch_times[nearest_idx]), 2),
+            "phase": str(batch_phases[nearest_idx]),
+            "pc_scores": {
+                "PC1": round(float(batch_scores[nearest_idx, 0]), 4),
+                "PC2": round(float(batch_scores[nearest_idx, 1]), 4),
+                "PC3": round(float(batch_scores[nearest_idx, 2]), 4),
+            },
+            "variance_explained": ve,
+        }, indent=2)
+    phase_summary = {}
+    for phase in ["Lag", "Exponential", "Stationary", "Decline"]:
+        mask = batch_phases == phase
+        if mask.any():
+            phase_summary[phase] = {
+                "PC1_mean": round(float(batch_scores[mask, 0].mean()), 4),
+                "PC2_mean": round(float(batch_scores[mask, 1].mean()), 4),
+                "PC3_mean": round(float(batch_scores[mask, 2].mean()), 4),
+            }
+    return json.dumps({"batch_id": batch_id, "variance_explained": ve, "trajectory_by_phase": phase_summary}, indent=2)
+
+
+@app.tool()
+async def get_correlations(top_n: int = 10) -> str:
+    """Correlation matrix for PCA candidate variables with top N pairs highlighted."""
+    corr = df_batch_1_10[PCA_VARS].corr()
+    pairs = []
+    for i, var1 in enumerate(PCA_VARS):
+        for j, var2 in enumerate(PCA_VARS):
+            if i < j:
+                pairs.append((var1, var2, round(float(corr.loc[var1, var2]), 4)))
+    pairs.sort(key=lambda x: abs(x[2]), reverse=True)
+    return json.dumps({
+        "top_correlated_pairs": [
+            {"var1": p[0], "var2": p[1], "correlation": p[2]}
+            for p in pairs[:top_n]
+        ],
+    }, indent=2)
+
 
 if __name__ == "__main__":
     app.run()
